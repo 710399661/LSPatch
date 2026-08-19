@@ -17,7 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
-import org.lsposed.lspatch.service.LogCollectorService
+import org.lsposed.lspatch.service.ManagerResidentService
 import org.lsposed.lspatch.share.LSPConfig
 import org.lsposed.lspatch.util.LSPPackageManager
 import org.lsposed.lspatch.util.ShizukuApi
@@ -35,7 +35,7 @@ import org.matrix.vector.ui.logs.isThrowableHeader
 /**
  * LSPatch's Shizuku-backed implementation of the shared Logs screen's [LogSource].
  *
- * Where Vector streams a rotating file from a root daemon, LSPatch has [LogCollectorService] keep a shell-side
+ * Where Vector streams a rotating file from a root daemon, LSPatch has [ManagerResidentService] keep a shell-side
  * collector running continuously (see [ShizukuService]): it fans one live logcat into two rotating, timestamped stream
  * files the shell user owns — `verbose` (every line) and `framework`. This reads those parts back — so the screen's
  * part chevrons are real rotations, and logs captured while the screen was closed are still there — falling back to a
@@ -72,7 +72,7 @@ class LSPLogSource(private val context: Context) : LogSource {
         // Both streams are collected and rotated on disk now, so both page through real parts: the
         // verbose stream is every line, the framework stream is the uid/crash-routed subset the
         // collector wrote separately (see [ShizukuService]).
-        ShizukuApi.listLogParts(LogCollectorService.LOG_DIR, streamPrefix(verbose)).map { it.first }
+        ShizukuApi.listLogParts(ManagerResidentService.LOG_DIR, streamPrefix(verbose)).map { it.first }
 
     override suspend fun open(verbose: Boolean, part: String?): Result<LogContent?> {
         // The fallback: an app may always read its own process's log, so a manager without Shizuku
@@ -92,7 +92,7 @@ class LSPLogSource(private val context: Context) : LogSource {
                 if (part != null) {
                     ShizukuApi.readLogPart(part, LIVE_MAX)
                 } else {
-                    val newest = ShizukuApi.listLogParts(LogCollectorService.LOG_DIR, prefix).lastOrNull()?.first
+                    val newest = ShizukuApi.listLogParts(ManagerResidentService.LOG_DIR, prefix).lastOrNull()?.first
                     val live = newest?.let { ShizukuApi.readLogPart(it, LIVE_MAX) }
                     // Before the collector has written anything (Shizuku just granted, service still
                     // spinning up), fall back to a one-shot snapshot so the screen is never blank.
@@ -241,7 +241,7 @@ class LSPLogSource(private val context: Context) : LogSource {
                 // none of the lines describing the breakage.
                 if (shizuku) {
                     for (prefix in listOf("verbose", "framework")) {
-                        ShizukuApi.listLogParts(LogCollectorService.LOG_DIR, prefix).forEach { (path, _) ->
+                        ShizukuApi.listLogParts(ManagerResidentService.LOG_DIR, prefix).forEach { (path, _) ->
                             shellFileEntry("logs/${path.substringAfterLast('/')}", path)
                         }
                     }
@@ -397,8 +397,8 @@ class LSPLogSource(private val context: Context) : LogSource {
                 ShizukuApi.startNewLogPart()
             } else {
                 ShizukuApi.startLogCollector(
-                    LogCollectorService.LOG_DIR,
-                    LogCollectorService.relevantUids(context),
+                    ManagerResidentService.LOG_DIR,
+                    ManagerResidentService.relevantUids(context),
                 )
             }
         }

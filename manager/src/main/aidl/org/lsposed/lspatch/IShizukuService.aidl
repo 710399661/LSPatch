@@ -48,4 +48,20 @@ interface IShizukuService {
     // current parts close and fresh ones open, so collection never has a gap. This is the rootless
     // equivalent of Vector's "start a new log". Returns false when no collector is running.
     boolean startNewLogPart() = 9;
+
+    // --- Keeping the manager reachable. This process runs as the shell user and is owned by the
+    // Shizuku server rather than by the manager, so it is not what a device's background reaper or a
+    // force-stop acts on -- which is the whole reason the watchdog lives here and not in the app. ---
+
+    // Starts a supervisor that starts [component] (an "package/class" name, in [userId]) again
+    // whenever no process of [packageName] is running, checking every [intervalSeconds]. Started from
+    // the shell, that start also clears the stopped state a force-stop leaves behind, which nothing
+    // running inside the app can do. Replaces any watchdog already running.
+    boolean startManagerWatchdog(String packageName, String component, int userId, int intervalSeconds) = 11;
+
+    // Stops the supervisor, if any.
+    void stopManagerWatchdog() = 12;
+
+    // Whether a supervisor is currently running.
+    boolean isManagerWatchdogRunning() = 13;
 }
