@@ -272,6 +272,44 @@ public class SigBypass {
         }
     }
 
+    /**
+     * 伪造 {@code getSigningCertificateHistory} 返回的签名 lineage。
+     *
+     * <p>一些完整性校验库查询的是签名轮替历史（lineage），而不是当前签名者。{@link #replaceSignature}
+     * 对 {@code getApkContentsSigners()} 的替换以及 {@link #replaceSigningDetails} 写入的都是
+     * SigningDetails 的 {@code mSignatures} 字段；而 lineage 存放在另一个字段
+     * {@code mSigningCertificateHistory} 里，不在已替换范围内。所以应用调用
+     * {@code signingInfo.getSigningCertificateHistory()} 时拿到的仍是 LSPatch 的证书，
+     * 会触发"已篡改"检测。此 hook 把返回数组也替换成原始签名，补上这个缺口。</p>
+     *
+     * <p>仅处理本应用：与 {@link #hookSigningCertificateCheck} 同样的假设 —— 自查才是需要应答
+     * 的场景，外应用的历史签名不触碰。</p>
+     */
+    private static void hookSigningCertificateHistory(Context context) {
+        try {
+            // SigningInfo 自 Android 9 (API 28) 起存在；LSPatch 的 minSdk 即 28，反射加载安全
+            Class<?> signingInfoClass = Class.forName("android.content.pm.SigningInfo");
+            XposedBridge.hookAllMethods(signingInfoClass, "getSigningCertificateHistory", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    String self = context.getPackageName();
+                    String replacement = signatures.get(self);
+                    if (replacement == null) return;
+                    Signature[] result = (Signature[]) param.getResult();
+                    if (result == null || result.length == 0) return;
+                    Signature original = new Signature(replacement);
+                    // 替换整个 lineage，避免任一历史条目仍泄露 LSPatch 证书
+                    for (int i = 0; i < result.length; i++) {
+                        result[i] = original;
+                    }
+                    XLog.d(TAG, "getSigningCertificateHistory spoofed for `" + self + "`");
+                }
+            });
+        } catch (Throwable t) {
+            XLog.d(TAG, "hookSigningCertificateHistory skipped: " + t.getMessage());
+        }
+    }
+
     private static byte[] sha256(byte[] input) {
         try {
             return java.security.MessageDigest.getInstance("SHA-256").digest(input);
@@ -289,6 +327,7 @@ public class SigBypass {
             hookApplicationPackageManager(context);
             hookPackageArchiveInfo(context);
             hookSigningCertificateCheck(context);
+            hookSigningCertificateHistory(context);
         }
         if (sigBypassLevel >= Constants.SIGBYPASS_LV_PM_OPENAT) {
             String cacheApkPath;
