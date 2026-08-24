@@ -18,6 +18,10 @@ import android.os.UserHandle;
 import android.util.Log;
 import android.widget.Toast;
 import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -25,6 +29,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.ZipFile;
 import org.lsposed.lspatch.share.Constants;
 import org.lsposed.lspatch.util.LoadedModules;
 import org.matrix.vector.ipc.IFrameworkService;
@@ -56,7 +61,7 @@ public class RemoteApplicationService implements IFrameworkService {
      * fatal -- the snapshot answers instead and the binding stays live for whenever the manager does
      * come up -- so there is nothing to buy by waiting longer.
      */
-    private static final long BIND_TIMEOUT_MS = 1500;
+    private static final long BIND_TIMEOUT_MS = 3000;
 
     private static final long REBIND_DELAY_MS = 2000;
     private static final long REBIND_MAX_DELAY_MS = 300_000;
@@ -147,44 +152,154 @@ public class RemoteApplicationService implements IFrameworkService {
 
     private final CountDownLatch connected = new CountDownLatch(1);
 
+    /**
+     * The manager packages to try, in order: the name this app was patched against (recorded in the
+     * patch config), then the stock package id. Matches the order used by the meta-loader so that a
+     * cloak that the loader bootstrap tolerates is also tolerated when *binding* the manager's
+     * service. Otherwise a cloak-rebrand or a cloak-revert leaves the loader trying to reach a
+     * package that is no longer installed: bind() then returns false straight away and, with no
+     * saved module snapshot, the app is reported "running unhooked" with the opaque "LSPatch
+     * manager not reachable" toast.
+     */
+    private static List<String> managerCandidates(String recorded) {
+        var ordered = new LinkedHashSet<String>(2);
+        if (recorded != null && !recorded.isEmpty()) ordered.add(recorded);
+        ordered.add(Constants.MANAGER_PACKAGE_NAME);
+        return new ArrayList<>(ordered);
+    }
+
+    /** Whether the candidate APK actually carries the loader dex asset -- same shape check the meta-
+     *  loader uses, so we don't settle for a package whose name collides but has no loader in it. */
+    private static boolean carriesLoader(String sourceDir) {
+        if (sourceDir == null) return false;
+        try (var zip = new ZipFile(new File(sourceDir))) {
+            return zip.getEntry(Constants.LOADER_DEX_ASSET_PATH) != null;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private String resolveManagerPackage(List<String> candidates) {
+        var pm = context.getPackageManager();
+        String fallback = null;
+        for (String candidate : candidates) {
+            try {
+                var info = pm.getApplicationInfo(candidate, 0);
+                if (info == null || info.sourceDir == null) continue;
+                // First candidate that is actually installed wins. The meta-loader has already
+                // confirmed one of these candidates carries the loader (we would not be starting
+                // in manager mode otherwise), so a simple PM-level check is enough here to skip
+                // uninstalled recorded names after a cloak revert.
+                if (fallback == null) fallback = candidate;
+                if (carriesLoader(info.sourceDir)) {
+                    Log.i(TAG, "Resolved manager candidate " + candidate + " (sourceDir carries loader)");
+                    return candidate;
+                }
+            } catch (Throwable t) {
+                // Package not visible to us (queries filter / not installed for this user). The
+                // meta-loader has a privileged view (IPackageManager + HiddenApiBypass) and may
+                // have succeeded even when the app's PackageManager cannot see the package, so
+                // we swallow this and keep the candidate for the plain bindService() attempt.
+                Log.w(TAG, "Manager candidate " + candidate + " is not visible to PackageManager", t);
+            }
+        }
+        if (fallback != null) {
+            Log.w(TAG, "No manager candidate passed the loader check; falling back to installed candidate " + fallback);
+            return fallback;
+        }
+        // None of the candidates were visible through PackageManager. Use the recorded / stock
+        // order and let bindService() surface the failure; preserving the original behavior.
+        return candidates.get(0);
+    }
+
     public RemoteApplicationService(Context context, String managerPackageName) {
         this.context = context;
-        this.managerPackage = (managerPackageName == null || managerPackageName.isEmpty())
-                ? Constants.MANAGER_PACKAGE_NAME
-                : managerPackageName;
+        var candidates = managerCandidates(
+                (managerPackageName == null || managerPackageName.isEmpty())
+                        ? null : managerPackageName);
+        this.managerPackage = resolveManagerPackage(candidates);
         this.stateDir = new File(context.getNoBackupFilesDir(), "lspatch");
         this.snapshot = new ModuleSnapshot(context);
         this.deliveryLog = new ModuleDeliveryLog(context);
 
-        Log.i(TAG, "Request manager binder from " + managerPackage);
+        // Attempt each visible candidate in order. The first bind() that the system accepts is
+        // kept; if it times out unanswered, the binding is left in place (so a late answer still
+        // propagates through onServiceConnected), matching the historical single-candidate
+        // behavior. Earlier candidates are unbound cleanly before moving on, so the system does
+        // not accumulate orphan binding records when the recorded name is stale.
         var start = SystemClock.elapsedRealtime();
-        if (bind()) {
+        long timeBudgetMs = BIND_TIMEOUT_MS;
+        List<String> tried = new ArrayList<>(candidates.size());
+        boolean anyBindAccepted = false;
+
+        // Build the ordered search list: prefer the resolved manager, then fall back to the
+        // remaining candidates in case resolveManagerPackage chose wrongly (e.g. because the
+        // PM query was filtered and picked an installed-but-empty package, while another
+        // candidate would actually bind).
+        var search = new LinkedHashSet<String>();
+        search.add(this.managerPackage);
+        search.addAll(candidates);
+
+        for (String candidate : search) {
+            tried.add(candidate);
+            // Swap the currently-targeted package for the duration of this candidate attempt.
+            String prev = this.managerPackage;
+            this.managerPackage = candidate;
+            Log.i(TAG, "Request manager binder from " + candidate);
+            long stepStart = SystemClock.elapsedRealtime();
+            boolean boundNow = bind();
+            if (!boundNow) {
+                this.managerPackage = prev;
+                Log.e(TAG, "System refused to bind " + candidate + "; trying next candidate");
+                continue;
+            }
+            anyBindAccepted = true;
+            long remaining = Math.max(100L, timeBudgetMs - (SystemClock.elapsedRealtime() - start));
             try {
-                if (connected.await(BIND_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                    Log.i(TAG, "Manager binder received in " + (SystemClock.elapsedRealtime() - start) + "ms");
+                if (connected.await(remaining, TimeUnit.MILLISECONDS)) {
+                    Log.i(TAG, "Manager binder received in "
+                            + (SystemClock.elapsedRealtime() - start) + "ms"
+                            + " (tried " + tried.size() + " candidate(s))");
                     return;
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-            // A late bind and one that never lands are the same from here, and only the elapsed time
-            // tells them apart. The binding is left in place: the manager may still come up, and when
-            // it does it corrects the snapshot for the next launch.
-            Log.w(TAG, "Manager did not answer in " + (SystemClock.elapsedRealtime() - start) + "ms");
+            long elapsedStep = SystemClock.elapsedRealtime() - stepStart;
+            if (elapsedStep >= remaining - 50L) {
+                // Budget exhausted on this candidate. Leave the binding in place for a late
+                // answer; do not try further candidates because the app's own startup is being
+                // held open waiting on this constructor to return.
+                Log.w(TAG, "Manager " + candidate + " did not answer in " + elapsedStep
+                        + "ms; budget exhausted, not trying remaining candidates");
+                break;
+            }
+            // Candidate accepted the bind but onServiceConnected never fired within the step
+            // slice: unbind it cleanly before moving to the next candidate so we do not leave
+            // the system holding a dead binding.
+            unbind();
+            this.managerPackage = prev;
+            Log.w(TAG, "Manager " + candidate + " did not answer in " + elapsedStep
+                    + "ms; moving to next candidate");
+        }
+
+        // If we get here, no candidate delivered a binder in time.
+        long totalMs = SystemClock.elapsedRealtime() - start;
+        if (anyBindAccepted) {
+            Log.w(TAG, "Manager did not answer in " + totalMs + "ms (tried: " + tried + ")");
         } else {
-            // The system refuses when it will not start the manager at all -- it is not installed, or
-            // its package is in a state the system will not launch from here. Waiting changes nothing,
-            // so this is reported on its own and the rebind is left to the schedule.
-            Log.e(TAG, "System refused to bind " + managerPackage + "; it may not be installed");
+            Log.e(TAG, "System refused to bind any manager candidate (" + tried
+                    + "); manager may not be installed");
             scheduleRebind();
         }
         deliveryLog.recordFallback();
         if (snapshot.isEmpty()) {
-            // Nothing cached and nobody to ask: this app is genuinely running unhooked, and that is
-            // worth telling the person holding the phone, because nothing else will.
-            toast("LSPatch manager not reachable");
+            // Nothing cached and nobody to ask: this app is genuinely running unhooked, and that
+            // is worth telling the person holding the phone -- nothing else will. Be specific
+            // about which package(s) were attempted so diagnosing a cloak mismatch is easier.
+            toast("LSPatch manager not reachable (tried: " + String.join(", ", tried) + ")");
         } else {
-            Log.i(TAG, "Loading modules from this app's own snapshot");
+            Log.i(TAG, "Loading modules from this app's own snapshot (" + totalMs + "ms startup timeout)");
         }
     }
 
@@ -192,7 +307,13 @@ public class RemoteApplicationService implements IFrameworkService {
     private boolean bind() {
         var intent = new Intent()
                 .setComponent(new ComponentName(managerPackage, Constants.MANAGER_SERVICE_NAME))
-                .putExtra("packageName", context.getPackageName());
+                .putExtra("packageName", context.getPackageName())
+                // The manager may have been force-stopped by a battery saver, a user gesture, or
+                // a cloak update; without this flag the system refuses to wake a stopped app on
+                // some OEM builds, producing a silent bind-failure that surfaces as the opaque
+                // "manager not reachable" toast. Safe to use even when the manager is not
+                // stopped -- it simply has no effect on a running app.
+                .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
         // TODO: Authentication
         deliveryLog.describeTo(intent);
         try {
