@@ -47,6 +47,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -296,13 +297,14 @@ public class LSPApplication {
             Log.i(TAG, "Signature bypass level: " + config.optInt("sigBypassLevel"));
 
             Path originPath = Paths.get(appInfo.dataDir, "cache/lspatch/origin/");
-            Path cacheApkPath;
+            final Path cacheApkPath;
+            final long expectedEntryCrc;
             try (ZipFile sourceFile = new ZipFile(appInfo.sourceDir)) {
-                cacheApkPath = originPath.resolve(sourceFile.getEntry(ORIGINAL_APK_ASSET_PATH).getCrc() + ".apk");
+                var entry = sourceFile.getEntry(ORIGINAL_APK_ASSET_PATH);
+                expectedEntryCrc = entry.getCrc();
+                cacheApkPath = originPath.resolve(expectedEntryCrc + ".apk");
             }
 
-            appInfo.sourceDir = cacheApkPath.toString();
-            appInfo.publicSourceDir = cacheApkPath.toString();
             if (config.has("appComponentFactory")) {
                 appInfo.appComponentFactory = config.optString("appComponentFactory");
             } else {
@@ -312,15 +314,99 @@ public class LSPApplication {
                 appInfo.appComponentFactory = null;
             }
 
-            if (!Files.exists(cacheApkPath)) {
-                Log.i(TAG, "Extract original apk");
-                FileUtils.deleteFolderIfExists(originPath);
-                Files.createDirectories(originPath);
-                try (InputStream is = baseClassLoader.getResourceAsStream(ORIGINAL_APK_ASSET_PATH)) {
-                    Files.copy(is, cacheApkPath);
+            Files.createDirectories(originPath);
+
+            // Selectively clean stale cache files (old CRC versions / leftover .tmp from a
+            // previous interrupted extraction) without nuking the entire folder, so that
+            // concurrent processes racing on the same crc filename do not clobber each other.
+            String expectedApkName = cacheApkPath.getFileName().toString();
+            String expectedTmpName = expectedApkName + ".tmp";
+            File[] staleFiles = originPath.toFile().listFiles((dir, name) ->
+                    (name.endsWith(".apk") || name.endsWith(".apk.tmp"))
+                            && !name.equals(expectedApkName) && !name.equals(expectedTmpName));
+            if (staleFiles != null) {
+                for (File f : staleFiles) {
+                    try {
+                        Files.deleteIfExists(f.toPath());
+                    } catch (IOException ignored) {
+                    }
                 }
             }
+
+            // 1) If cache exists, validate it is a readable ZipFile with non-zero size.
+            //    Do NOT trust Files.exists alone: a prior interrupted extraction may have
+            //    left a zero-length / truncated / corrupt file on disk.
+            boolean cacheValid = false;
+            if (Files.exists(cacheApkPath)) {
+                File cacheFile = cacheApkPath.toFile();
+                if (cacheFile.length() > 0) {
+                    try (ZipFile ignored = new ZipFile(cacheFile)) {
+                        cacheValid = true;
+                        Log.i(TAG, "Valid cached original apk found: " + cacheApkPath);
+                    } catch (IOException e) {
+                        Log.w(TAG, "Cached original apk is corrupt, removing: " + cacheApkPath, e);
+                        Files.deleteIfExists(cacheApkPath);
+                    }
+                } else {
+                    Log.w(TAG, "Cached original apk is zero-length, removing: " + cacheApkPath);
+                    Files.deleteIfExists(cacheApkPath);
+                }
+            }
+
+            // 2) If no valid cache exists: extract atomically via a .tmp sibling + move,
+            //    then re-validate the final file.
+            if (!cacheValid) {
+                Log.i(TAG, "Extract original apk (asset entry crc=" + expectedEntryCrc + ")");
+                Path tmpPath = originPath.resolve(expectedTmpName);
+                Files.deleteIfExists(tmpPath);
+                try (InputStream is = baseClassLoader.getResourceAsStream(ORIGINAL_APK_ASSET_PATH)) {
+                    if (is == null) {
+                        throw new IllegalStateException(
+                                "Missing original-apk asset on classpath: " + ORIGINAL_APK_ASSET_PATH);
+                    }
+                    Files.copy(is, tmpPath);
+                }
+                // Validate the extracted tmp file before promoting it.
+                File tmpFile = tmpPath.toFile();
+                if (tmpFile.length() == 0) {
+                    throw new IOException("Extracted original apk is zero-length: " + tmpPath);
+                }
+                try (ZipFile ignored = new ZipFile(tmpFile)) {
+                    // forces the ZipFile central directory to be parsed and validated.
+                }
+                try {
+                    Files.move(tmpPath, cacheApkPath,
+                            StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                    Log.w(TAG, "Atomic move not supported on this fs, falling back to copy+delete move");
+                    Files.move(tmpPath, cacheApkPath, StandardCopyOption.REPLACE_EXISTING);
+                }
+                Log.i(TAG, "Extracted original apk is ready: " + cacheApkPath);
+            }
             cacheApkPath.toFile().setWritable(false);
+
+            // 3) Final defensive verification BEFORE wiring the cache path into
+            //    appInfo. If the cache is missing/corrupt here we fail loudly so that
+            //    the crash log clearly points at the cache, not a misleading
+            //    ClassNotFoundException / DexPathList[[]] later on.
+            File finalCacheFile = cacheApkPath.toFile();
+            if (!Files.exists(cacheApkPath) || finalCacheFile.length() == 0) {
+                throw new IllegalStateException("Original APK cache is not ready (missing or zero-length): "
+                        + cacheApkPath);
+            }
+            try (ZipFile ignored = new ZipFile(finalCacheFile)) {
+                // last sanity check: ZipFile is parseable.
+            } catch (IOException e) {
+                throw new IllegalStateException("Original APK cache is not a valid zip: " + cacheApkPath, e);
+            }
+
+            // --- Only now, after full validation, wire the cache path into ApplicationInfo.
+            // Previously this assignment happened BEFORE extraction, so an interrupted
+            // extraction left appInfo.sourceDir pointing at a non-existent / partial file,
+            // resulting in an empty DexPathList and a cryptic ClassNotFoundException on
+            // the application class (e.g. com.netease.nis.wrapper.MyApplication).
+            appInfo.sourceDir = cacheApkPath.toString();
+            appInfo.publicSourceDir = cacheApkPath.toString();
 
             var mPackages = (Map<?, ?>) XposedHelpers.getObjectField(activityThread, "mPackages");
             mPackages.remove(appInfo.packageName);
@@ -357,6 +443,28 @@ public class LSPApplication {
      * holding the stub LoadedApk at the real one.
      */
     private static void realizeLoadedApk() {
+        // Defensive TOCTOU guard: between createLoadedApkWithContext() and this call a race
+        // with process-death cleanup or a concurrent restart could have removed / truncated
+        // the original-APK cache. Re-validate here, right before the ClassLoader is built,
+        // so a failure produces a direct, actionable IllegalStateException instead of the
+        // misleading "ClassNotFoundException on MyApplication" with an empty DexPathList.
+        var realAppInfo = appLoadedApk.getApplicationInfo();
+        if (realAppInfo != null && realAppInfo.sourceDir != null) {
+            File cache = new File(realAppInfo.sourceDir);
+            boolean ok = cache.exists() && cache.length() > 0;
+            if (ok) {
+                try (ZipFile ignored = new ZipFile(cache)) {
+                    // parse central directory to sanity-check zip integrity.
+                } catch (IOException e) {
+                    ok = false;
+                }
+            }
+            if (!ok) {
+                throw new IllegalStateException(
+                        "Original APK cache is missing/corrupt right before ClassLoader build: "
+                                + realAppInfo.sourceDir);
+            }
+        }
         appLoadedApk.getClassLoader();
 
         var activityClientRecordClass = XposedHelpers.findClass("android.app.ActivityThread$ActivityClientRecord", ActivityThread.class.getClassLoader());
