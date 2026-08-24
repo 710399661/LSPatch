@@ -1,4 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name" translatable="false">LSPatch</string>
+
+    <!-- Foreground-service channel + notification for patch jobs. The strings are untranslatable by
+         choice: the user has eyes on the in-app patch screen already (which is localised), so the
+         notification is really a signal to the *system* that the manager's process must stay alive
+         in the background while it is patching. Writing to an untranslatable file keeps the patch
+         pipeline independent of translation coverage. -->
+    <string name="patch_work_channel" translatable="false">APK Patching</string>
+    <string name="patch_work_title_patching" translatable="false">Patching %1$s</string>
+    <string name="patch_work_title_installing" translatable="false">Installing %1$s</string>
+    <string name="patch_work_title_uninstalling" translatable="false">Uninstalling %1$s</string>
+    <string name="patch_work_title_restoring" translatable="false">Restoring %1$s</string>
+    <string name="patch_work_text" translatable="false">Keeping LSPatch alive so the APK is not left half-written.</string>
+    <string name="patch_work_stage" translatable="false">%1$s %2$d/%3$d</string>
 </resources>

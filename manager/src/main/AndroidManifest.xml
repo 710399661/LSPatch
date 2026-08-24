@@ -19,7 +19,9 @@
          the "special use" type. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- So the service comes back after a reboot without the person having to open the manager. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Only ever used to ask, through the system's own dialog. Doze is what stops a manager that was
@@ -83,6 +85,20 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="serving modules to patched apps and monitoring their logs" />
         </service>
+
+        <!-- Runs while a patch job (patch / install / restore) is active and keeps the manager in
+             the foreground, with a CPU wake lock and a Wi-Fi lock, so that leaving the app does not
+             leave the APK half-written on the slow step (writing & signing a 200 MB+ split). Uses
+             the dataSync FGS bucket: Android 14's rules allow the patch/install/restore lifecycle to
+             be treated as local user data migration, and it does not require the special-use
+             declaration caveat. A separate service from the resident one is deliberate — its
+             lifecycle exactly tracks the job's lifecycle, so once the patch/install/restore finishes
+             the manager can drop back to the silent resident-only notification instead of looking
+             permanently busy. -->
+        <service
+            android:name=".service.PatchWorkService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- Brings the service back after a reboot or an update of the manager itself. A package the
              system considers stopped receives neither, which is exactly the state a force-stop leaves

@@ -15,6 +15,7 @@ import org.lsposed.lspatch.data.model.PatchStage
 import org.lsposed.lspatch.data.model.PatchStep
 import org.lsposed.lspatch.data.model.PatchTarget
 import org.lsposed.lspatch.lspApp
+import org.lsposed.lspatch.service.PatchWorkService
 import org.lsposed.lspatch.util.LSPPackageManager
 import org.lsposed.lspatch.util.ShizukuApi
 import org.lsposed.lspatch.util.ShizukuOp
@@ -128,6 +129,11 @@ object PatchJobHost {
      */
     fun start(requested: PatchRequest): Boolean {
         if (busy) return false
+        // Promote the process to a DATA_SYNC foreground service *before* starting the coroutine.
+        // This keeps the 5 s post-button-press window Android 12+ gives to launch an FGS, and
+        // means the second or so spent inside resolvedNow() reading the installed APKs list (an
+        // expensive trip through PackageManager on a multi-split app) is already protected.
+        PatchWorkService.ensureStarted(lspApp)
         val (request, note) = resolvedNow(requested)
         _log.value = emptyList()
         _active.value = request
@@ -207,6 +213,12 @@ object PatchJobHost {
                 else -> return
             }
         if (busy) return
+        // Install can take as long or longer than the patch step itself: package installs through
+        // the platform PackageInstaller are synchronous (the user is stuck in the system UI), but
+        // Shizuku shell installs are opaque to the user and they often background the manager the
+        // moment the install step starts. Promoting to FGS again ensures that Shizuku install,
+        // and the uninstall step before it when that is needed, run to completion.
+        PatchWorkService.ensureStarted(lspApp)
         job =
             lspApp.globalScope.launch {
                 val useShizuku = ShizukuApi.ensureReadyOrFallback(ShizukuOp.Install)
@@ -262,6 +274,7 @@ object PatchJobHost {
     fun startRestore(app: LSPPackageManager.AppInfo) {
         if (busy) return
         val pkg = app.app.packageName
+        PatchWorkService.ensureStarted(lspApp)
         _log.value = emptyList()
         _active.value = null
         appendHeader(PatchReport.restorePreamble(app.label, pkg))

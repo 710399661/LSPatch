@@ -22,6 +22,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.lsposed.lspatch.R
 import org.lsposed.lspatch.config.Configs
+import org.lsposed.lspatch.data.repository.PatchJobHost
 import org.lsposed.lspatch.util.LSPPackageManager
 import org.lsposed.lspatch.util.ShizukuApi
 
@@ -144,6 +145,13 @@ class ManagerResidentService : Service() {
      * again rather than this one guessing.
      */
     private fun nothingToServe(): Boolean {
+        // A running patch / install / restore job counts as "something to serve" on its own: the
+        // resident service is the only thing keeping this manager from being demoted to a cached
+        // process before the patch-work FGS is promoted, and it must not self-stop while the
+        // PatchWorkService notification is still visible (otherwise a 15 s CHECK_INTERVAL_MS tick
+        // would kill process-level FGS protections exactly in the middle of Writing & Signing --
+        // which is exactly the Xiaomi/PowerInsight scenario the bug report shows).
+        if (PatchJobHost.busy) return false
         val apps = LSPPackageManager.appList
         if (apps.isEmpty()) return false
         return apps.none { it.isModule || it.app.metaData?.containsKey("lspatch") == true }
