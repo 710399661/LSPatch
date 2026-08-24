@@ -1,0 +1,26 @@
+AndroidRuntime: FATAL EXCEPTION: main
+AndroidRuntime: Process: com.netease.cloudmusic, PID: 7926
+AndroidRuntime: java.lang.RuntimeException: Unable to instantiate application com.netease.nis.wrapper.MyApplication package com.netease.cloudmusic
+AndroidRuntime: 	at android.app.LoadedApk.throwForNewApplicationFailure(LoadedApk.java:1824)
+AndroidRuntime: 	at android.app.LoadedApk.onNewApplicationFailed(LoadedApk.java:1814)
+AndroidRuntime: 	at android.app.LoadedApk.makeApplicationInner(LoadedApk.java:1764)
+AndroidRuntime: 	at android.app.LoadedApk.makeApplicationInner(LoadedApk.java:1683)
+AndroidRuntime: 	at android.app.ActivityThread.handleBindApplication(ActivityThread.java:9408)
+AndroidRuntime: 	at android.app.ActivityThread.-$$Nest$mhandleBindApplication(ActivityThread.java:0)
+AndroidRuntime: 	at android.app.ActivityThread$H.handleMessage(ActivityThread.java:3208)
+AndroidRuntime: 	at android.os.Handler.dispatchMessageImpl(Handler.java:146)
+AndroidRuntime: 	at android.os.Handler.dispatchMessage(Handler.java:129)
+AndroidRuntime: 	at android.os.Looper.loopOnce(Looper.java:315)
+AndroidRuntime: 	at android.os.Looper.loop(Looper.java:419)
+AndroidRuntime: 	at android.app.ActivityThread.main(ActivityThread.java:10832)
+AndroidRuntime: 	at java.lang.reflect.Method.invoke(Native Method)
+AndroidRuntime: 	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:598)
+AndroidRuntime: 	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:1150)
+AndroidRuntime: Caused by: java.lang.ClassNotFoundException: Didn't find class "com.netease.nis.wrapper.MyApplication" on path: DexPathList[[],nativeLibraryDirectories=[/data/app/~~1Ip8-BXIi8N4kCCDM1Ivhg==/com.netease.cloudmusic-8z-3oYj14wCfEkaZ_cpaTA==/lib/arm64, /data/user/0/com.netease.cloudmusic/cache/lspatch/origin/1574752127.apk!/lib/arm64-v8a, /system/lib64, /system_ext/lib64]]
+AndroidRuntime: 	at dalvik.system.BaseDexClassLoader.findClass(BaseDexClassLoader.java:259)
+AndroidRuntime: 	at java.lang.ClassLoader.loadClass(ClassLoader.java:644)
+AndroidRuntime: 	at java.lang.ClassLoader.loadClass(ClassLoader.java:580)
+AndroidRuntime: 	at android.app.AppComponentFactory.instantiateApplication(AppComponentFactory.java:80)
+AndroidRuntime: 	at android.app.Instrumentation.newApplication(Instrumentation.java:1370)
+AndroidRuntime: 	at android.app.LoadedApk.makeApplicationInner(LoadedApk.java:1760)
+AndroidRuntime: 	... 12 more
